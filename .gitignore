@@ -1,1 +1,49 @@
-﻿.env
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+credentials.json
+serviceAccount*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+env/
+.venv/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Builds
+dist/
+build/
+
+# Data / models
+*.sqlite3
+*.db
+*.h5
+*.pt
+*.pkl
+*.ckpt
+*.onnx
+data/
+datasets/
+
+# Generated output
+out/
+optimized_prompt_*.txt
+improved_prompt.txt
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
