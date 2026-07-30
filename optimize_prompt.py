@@ -1,29 +1,55 @@
-import subprocess
+"""File-in / file-out convenience script.
 
-# File paths
-input_path = "rough_prompt.txt"
-template_path = "prompt_template.txt"
-output_path = "improved_prompt.txt"
+Reads rough_prompt.txt, optimizes it, writes improved_prompt.txt. Uses the LLM
+engine when GEMINI_API_KEY is set and falls back to the heuristic engine
+otherwise, so it always produces a result.
 
-# Read rough prompt
-with open(input_path, "r") as f:
-    rough_prompt = f.read()
+    python optimize_prompt.py [input.txt] [output.txt]
+"""
 
-# Read instruction template
-with open(template_path, "r") as f:
-    template = f.read()
+import sys
+from pathlib import Path
 
-# Combine into final input
-final_prompt = template.replace("{{PROMPT}}", rough_prompt)
+from prompt_optimizer import PromptOptimizer
+from prompt_optimizer.errors import PromptOptimizerError
 
-# Run Gemini CLI with the prompt
-cmd = ["gemini", "--model", "gemini-1.5-pro", "--multiline"]
+DEFAULT_INPUT = "rough_prompt.txt"
+DEFAULT_OUTPUT = "improved_prompt.txt"
 
-process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-output, _ = process.communicate(input=final_prompt)
 
-# Save output
-with open(output_path, "w") as f:
-    f.write(output.strip())
+def main() -> int:
+    input_path = Path(sys.argv[1] if len(sys.argv) > 1 else DEFAULT_INPUT)
+    output_path = Path(sys.argv[2] if len(sys.argv) > 2 else DEFAULT_OUTPUT)
 
-print("✅ Optimized prompt saved to", output_path)
+    if not input_path.is_file():
+        print(f"error: {input_path} not found", file=sys.stderr)
+        return 2
+
+    rough_prompt = input_path.read_text(encoding="utf-8").strip()
+    if not rough_prompt:
+        print(f"error: {input_path} is empty", file=sys.stderr)
+        return 2
+
+    try:
+        result = PromptOptimizer().optimize(rough_prompt)
+    except PromptOptimizerError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    output_path.write_text(result.optimized + "\n", encoding="utf-8")
+
+    print(f"engine        : {result.engine}")
+    print(f"template      : {result.template}")
+    print(
+        f"effectiveness : {result.analysis_before.effectiveness:.2f} -> "
+        f"{result.analysis_after.effectiveness:.2f} ({result.improvement:+.2f})"
+    )
+    if result.fallback_reason:
+        reason = " ".join(result.fallback_reason.split())
+        print(f"note          : {reason[:160]}")
+    print(f"written to    : {output_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
