@@ -38,17 +38,66 @@ _VAGUE_REPLACEMENTS = (
     (r"\betc\.?\b", "and the remaining cases listed below"),
 )
 
+_FENCE_LINE_RE = re.compile(r"^\s*```")
+_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
+# Trailing characters after which a full stop would be wrong or redundant.
+_TERMINAL_CHARS = ".!?:;,"
+
+
+def _tidy_line(line: str) -> str:
+    """Collapse runs of whitespace inside one line and de-vague its wording."""
+    text = " ".join(line.split())
+    for pattern, replacement in _VAGUE_REPLACEMENTS:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    return text
+
 
 def _normalize_task(prompt: str) -> str:
-    """Tidy the user's own words without changing what they asked for."""
-    task = " ".join(prompt.split())
-    for pattern, replacement in _VAGUE_REPLACEMENTS:
-        task = re.sub(pattern, replacement, task, flags=re.IGNORECASE)
-    if task and task[0].islower():
-        task = task[0].upper() + task[1:]
-    if task and task[-1] not in ".!?:":
-        task += "."
-    return task
+    """Tidy the user's own words without changing what they asked for.
+
+    Line structure is load-bearing in a prompt: bullet lists, numbered steps and
+    fenced code blocks all mean something. Only whitespace *within* a line is
+    collapsed, code fences are copied through byte-for-byte, and runs of blank
+    lines are squashed to one.
+    """
+    lines: List[str] = []
+    in_fence = False
+    blank_run = 0
+    for raw in prompt.splitlines():
+        if _FENCE_LINE_RE.match(raw):
+            in_fence = not in_fence
+            blank_run = 0
+            lines.append(raw.rstrip())
+            continue
+        if in_fence:
+            # Indentation is part of the code; keep it exactly as written.
+            blank_run = 0
+            lines.append(raw.rstrip())
+            continue
+        tidied = _tidy_line(raw)
+        if not tidied:
+            blank_run += 1
+            if blank_run > 1 or not lines:
+                continue
+            lines.append("")
+            continue
+        blank_run = 0
+        lines.append(tidied)
+
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not lines:
+        return ""
+
+    first = lines[0]
+    if first and first[0].islower() and not _LIST_ITEM_RE.match(first):
+        lines[0] = first[0].upper() + first[1:]
+
+    last = lines[-1]
+    # Never punctuate a closing code fence, and never double up punctuation.
+    if last and not _FENCE_LINE_RE.match(last) and last[-1] not in _TERMINAL_CHARS:
+        lines[-1] = last + "."
+    return "\n".join(lines)
 
 
 def _intent_requirements(intent: str) -> List[str]:

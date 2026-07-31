@@ -227,6 +227,11 @@ ACTION_VERBS = (
 )
 
 PLACEHOLDER_RE = re.compile(r"(\{\{\s*\w+\s*\}\}|<[A-Z_]{3,}>|\[[A-Z_]{3,}\])")
+# Matches an action verb only as a whole leading word: "list the files" yes,
+# "listen to this" no.
+_LEADING_ACTION_RE = re.compile(
+    r"^(?:%s)\b" % "|".join(re.escape(v) for v in ACTION_VERBS), re.IGNORECASE
+)
 _WORD_RE = re.compile(r"[A-Za-z']+")
 _SENTENCE_RE = re.compile(r"[.!?\n]+")
 _VOWEL_GROUPS_RE = re.compile(r"[aeiouy]+")
@@ -325,9 +330,9 @@ def find_ambiguities(prompt: str) -> List[str]:
     if len(words) < 6:
         findings.append("prompt is too short to constrain the model's output")
 
-    if "?" not in prompt and not any(
-        re.match(rf"^{verb}\b", lowered) for verb in ACTION_VERBS
-    ) and not _contains_any(lowered, ROLE_MARKERS):
+    if ("?" not in prompt
+            and not _LEADING_ACTION_RE.match(lowered)
+            and not _contains_any(lowered, ROLE_MARKERS)):
         findings.append("no explicit request: state the task with an action verb")
 
     return findings
@@ -433,7 +438,7 @@ def _clarity_score(prompt: str, words: int, avg_sentence_length: float, ease: fl
                    ambiguities: List[str]) -> float:
     lowered = prompt.lower().lstrip()
     score = 0.2
-    if any(lowered.startswith(verb) for verb in ACTION_VERBS) or "?" in prompt:
+    if _LEADING_ACTION_RE.match(lowered) or "?" in prompt:
         score += 0.2
     if words >= 12:
         score += 0.15
