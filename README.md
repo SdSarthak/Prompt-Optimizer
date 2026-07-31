@@ -46,6 +46,11 @@ cp .env.example .env      # then paste your key into .env
 | `PROMPT_OPTIMIZER_MODEL` | `gemini-2.5-flash` | Model used for rewriting. |
 | `PROMPT_OPTIMIZER_TEMPERATURE` | `0.4` | Sampling temperature, 0.0-2.0. |
 | `PROMPT_OPTIMIZER_ENGINE` | `auto` | `auto`, `heuristic`, or `llm`. |
+| `PROMPT_OPTIMIZER_TIMEOUT` | `60` | Seconds to wait for the provider. |
+| `PROMPT_OPTIMIZER_MAX_RETRIES` | `2` | Retries on a transient failure (429, 5xx, timeout). |
+
+Every value is validated on load, and `--model`, `--temperature`, `--timeout`
+and `--retries` override the environment per command.
 
 `.env` is gitignored. Never commit a real key.
 

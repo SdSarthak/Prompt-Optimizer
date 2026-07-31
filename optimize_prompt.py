@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from prompt_optimizer import PromptOptimizer
+from prompt_optimizer.cli import use_utf8_stdio
 from prompt_optimizer.errors import PromptOptimizerError
 
 DEFAULT_INPUT = "rough_prompt.txt"
@@ -21,11 +22,23 @@ def main() -> int:
     input_path = Path(sys.argv[1] if len(sys.argv) > 1 else DEFAULT_INPUT)
     output_path = Path(sys.argv[2] if len(sys.argv) > 2 else DEFAULT_OUTPUT)
 
+    use_utf8_stdio()
+
+    if input_path.is_dir():
+        print(f"error: {input_path} is a directory, not a file", file=sys.stderr)
+        return 2
     if not input_path.is_file():
         print(f"error: {input_path} not found", file=sys.stderr)
         return 2
 
-    rough_prompt = input_path.read_text(encoding="utf-8").strip()
+    try:
+        rough_prompt = input_path.read_text(encoding="utf-8").strip()
+    except UnicodeDecodeError:
+        print(f"error: {input_path} is not valid UTF-8 text", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"error: could not read {input_path}: {exc}", file=sys.stderr)
+        return 2
     if not rough_prompt:
         print(f"error: {input_path} is empty", file=sys.stderr)
         return 2
@@ -36,7 +49,12 @@ def main() -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    output_path.write_text(result.optimized + "\n", encoding="utf-8")
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(result.optimized + "\n", encoding="utf-8")
+    except OSError as exc:
+        print(f"error: could not write {output_path}: {exc}", file=sys.stderr)
+        return 2
 
     print(f"engine        : {result.engine}")
     print(f"template      : {result.template}")
