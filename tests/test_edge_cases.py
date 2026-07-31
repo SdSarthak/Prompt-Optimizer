@@ -8,7 +8,12 @@ import json
 
 import pytest
 
-from prompt_optimizer.analysis import analyze, find_ambiguities
+from prompt_optimizer.analysis import (
+    _collect_signals,
+    analyze,
+    detect_intent,
+    find_ambiguities,
+)
 from prompt_optimizer.heuristic import _normalize_task, build_prompt
 
 FENCED = (
@@ -141,3 +146,58 @@ def test_many_ambiguities_cannot_push_clarity_negative():
 
 def test_build_prompt_is_deterministic():
     assert build_prompt(FENCED) == build_prompt(FENCED)
+
+
+# --------------------------------------------------------------------------- #
+# Keyword matching must not fire on substrings
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "prompt,expected",
+    [
+        # "capital" contains "api", "latest" contains "test", "rapid" contains "api".
+        ("explain the capital of france", "explanation"),
+        ("what is the latest news", "explanation"),
+        ("describe a rapid deployment process", "explanation"),
+        ("help me code a website", "code"),
+        ("analyze the sales data", "analysis"),
+        ("write a story about the sea", "creative"),
+        ("make an image of a cat", "image"),
+        ("extract the names from this text", "extraction"),
+        ("reply to the customer politely", "conversation"),
+    ],
+)
+def test_intent_keywords_match_whole_words(prompt, expected):
+    assert detect_intent(prompt) == expected
+
+
+@pytest.mark.parametrize(
+    "prompt,signal",
+    [
+        ("this is commonly used in practice", "constraints"),  # "only" in "commonly"
+        ("we have unlimited scope here", "constraints"),  # "limit" in "unlimited"
+        ("describe the formatting of a novel", "tone"),  # "formal" in "formatting"
+    ],
+)
+def test_signal_markers_do_not_fire_on_substrings(prompt, signal):
+    assert _collect_signals(prompt)[signal] is False
+
+
+@pytest.mark.parametrize(
+    "prompt,signal",
+    [
+        ("only return the top three", "constraints"),
+        ("for example, a receipt", "examples"),
+        ("return json, e.g. {}", "examples"),
+        ("output: a markdown table", "output_format"),
+        ("keep a formal tone", "tone"),
+        ("you are a senior engineer", "role"),
+    ],
+)
+def test_real_signals_are_still_detected(prompt, signal):
+    assert _collect_signals(prompt)[signal] is True
+
+
+def test_intent_falls_back_to_general_without_keywords():
+    assert detect_intent("the quick brown fox jumps over the lazy dog") == "general"

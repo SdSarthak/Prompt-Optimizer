@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Dict, List, Tuple
 
 # --------------------------------------------------------------------------- #
@@ -232,6 +233,10 @@ PLACEHOLDER_RE = re.compile(r"(\{\{\s*\w+\s*\}\}|<[A-Z_]{3,}>|\[[A-Z_]{3,}\])")
 _LEADING_ACTION_RE = re.compile(
     r"^(?:%s)\b" % "|".join(re.escape(v) for v in ACTION_VERBS), re.IGNORECASE
 )
+
+# One compiled pattern per intent keyword, so a keyword is only a hit when it
+# appears as a whole word: "capital" must not count as the code keyword "api".
+_INTENT_PATTERNS: Dict[str, Tuple[Tuple[str, "re.Pattern[str]"], ...]] = {}
 _WORD_RE = re.compile(r"[A-Za-z']+")
 _SENTENCE_RE = re.compile(r"[.!?\n]+")
 _VOWEL_GROUPS_RE = re.compile(r"[aeiouy]+")
@@ -240,6 +245,33 @@ _VOWEL_GROUPS_RE = re.compile(r"[aeiouy]+")
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+
+
+def _marker_pattern(marker: str) -> str:
+    """Escape a marker and anchor it to word edges where that makes sense.
+
+    ``\\b`` is only appended next to an alphanumeric character, so markers that
+    end in punctuation ("e.g.", "output:") still match.
+    """
+    escaped = re.escape(marker)
+    left = r"\b" if marker[:1].isalnum() else ""
+    right = r"\b" if marker[-1:].isalnum() else ""
+    return f"{left}{escaped}{right}"
+
+
+@lru_cache(maxsize=None)
+def _marker_re(markers: Tuple[str, ...]) -> "re.Pattern[str]":
+    return re.compile("|".join(_marker_pattern(m) for m in markers), re.IGNORECASE)
+
+
+_INTENT_PATTERNS.update(
+    {
+        intent: tuple(
+            (kw, re.compile(_marker_pattern(kw), re.IGNORECASE)) for kw in keywords
+        )
+        for intent, keywords in INTENT_KEYWORDS.items()
+    }
+)
 
 
 def _clamp(value: float) -> float:
@@ -278,15 +310,27 @@ def flesch_reading_ease(text: str) -> float:
 
 
 def _contains_any(haystack: str, needles) -> bool:
-    return any(needle in haystack for needle in needles)
+    """True when any marker appears as a whole word, not as a substring.
+
+    Substring matching is what made "commonly" look like the constraint "only"
+    and "capital" look like the code keyword "api".
+    """
+    lowered = haystack.lower()
+    # A regex match implies the plain substring is present, so this cheap C-level
+    # prefilter keeps very large prompts fast.
+    if not any(needle in lowered for needle in needles):
+        return False
+    return _marker_re(tuple(needles)).search(lowered) is not None
 
 
 def detect_intent(prompt: str) -> str:
     """Best-guess of what the prompt is asking for."""
     lowered = prompt.lower()
     scores: Dict[str, int] = {}
-    for intent, keywords in INTENT_KEYWORDS.items():
-        hits = sum(1 for kw in keywords if kw in lowered)
+    for intent, keywords in _INTENT_PATTERNS.items():
+        hits = sum(
+            1 for kw, pattern in keywords if kw in lowered and pattern.search(lowered)
+        )
         if hits:
             scores[intent] = hits
     if not scores:
