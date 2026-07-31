@@ -23,6 +23,18 @@ def _one_line(text: str, limit: int = 160) -> str:
 
 
 @dataclass
+class BatchFailure:
+    """One prompt in a batch that could not be optimized."""
+
+    index: int
+    prompt: str
+    error: str
+
+    def to_dict(self) -> Dict[str, object]:
+        return {"index": self.index, "prompt": self.prompt, "error": self.error}
+
+
+@dataclass
 class OptimizationResult:
     """Everything one optimization run produced."""
 
@@ -79,8 +91,13 @@ class OptimizationResult:
     def save(self, path: str) -> str:
         """Write a human-readable record of the run."""
         target = Path(path)
-        if target.parent and not target.parent.exists():
-            target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if target.parent and not target.parent.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise PromptOptimizerError(
+                f"could not create the directory for {path}: {exc}"
+            ) from exc
         body = [
             "=" * 70,
             "PROMPT OPTIMIZATION RESULT",
@@ -103,7 +120,10 @@ class OptimizationResult:
             self.comparison.render(),
             "",
         ]
-        target.write_text("\n".join(body), encoding="utf-8")
+        try:
+            target.write_text("\n".join(body), encoding="utf-8")
+        except OSError as exc:
+            raise PromptOptimizerError(f"could not write {path}: {exc}") from exc
         return str(target)
 
 
@@ -114,6 +134,7 @@ class PromptOptimizer:
         self.config = config or load_config()
         self._rewriter = rewriter
         self.history: List[OptimizationResult] = []
+        self.failures: List[BatchFailure] = []
 
     # -- engines ---------------------------------------------------------- #
 
@@ -194,13 +215,37 @@ class PromptOptimizer:
         template: Optional[str] = None,
         target_model: str = "general",
         engine: Optional[str] = None,
+        stop_on_error: bool = False,
     ) -> List[OptimizationResult]:
-        """Optimize many prompts. One bad prompt does not stop the batch."""
+        """Optimize many prompts. One bad prompt does not stop the batch.
+
+        Blank entries are skipped silently; anything that actually fails - a
+        provider outage on the llm engine, a non-string entry - is recorded on
+        ``self.failures`` so a long run is never thrown away because one prompt
+        went wrong. Pass ``stop_on_error=True`` to get the old fail-fast
+        behaviour.
+        """
+        if isinstance(prompts, str):
+            raise PromptOptimizerError(
+                "optimize_batch expects a sequence of prompts, not a single string"
+            )
+        self.failures = []
         results: List[OptimizationResult] = []
-        for prompt in prompts:
+        for index, prompt in enumerate(prompts):
+            if not isinstance(prompt, str):
+                failure = BatchFailure(index, repr(prompt), "prompt is not a string")
+                if stop_on_error:
+                    raise PromptOptimizerError(f"prompt {index} is not a string")
+                self.failures.append(failure)
+                continue
             if not prompt.strip():
                 continue
-            results.append(self.optimize(prompt, template, target_model, engine))
+            try:
+                results.append(self.optimize(prompt, template, target_model, engine))
+            except PromptOptimizerError as exc:
+                if stop_on_error:
+                    raise
+                self.failures.append(BatchFailure(index, prompt, str(exc)))
         return results
 
     def compare(self, prompt_a: str, prompt_b: str, label_a: str = "A",

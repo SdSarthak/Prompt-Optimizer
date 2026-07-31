@@ -22,9 +22,24 @@ MODEL_FAMILIES = ("general", "gpt", "openai", "claude", "anthropic", "gemini", "
 
 def _read_text(path: str) -> str:
     file_path = Path(path)
+    if file_path.is_dir():
+        raise PromptOptimizerError(f"{path} is a directory, not a file")
     if not file_path.is_file():
         raise PromptOptimizerError(f"file not found: {path}")
-    return file_path.read_text(encoding="utf-8")
+    return _decode(file_path)
+
+
+def _decode(file_path: Path) -> str:
+    """Read a text file, turning every failure into an actionable message."""
+    try:
+        return file_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise PromptOptimizerError(
+            f"{file_path} is not valid UTF-8 text (byte {exc.start}); "
+            "prompts must be plain UTF-8 files"
+        ) from exc
+    except OSError as exc:
+        raise PromptOptimizerError(f"could not read {file_path}: {exc}") from exc
 
 
 def _resolve_prompt(text: Optional[Sequence[str]], file: Optional[str]) -> str:
@@ -38,8 +53,11 @@ def _resolve_prompt(text: Optional[Sequence[str]], file: Optional[str]) -> str:
         if not content:
             raise PromptOptimizerError(f"{file} is empty")
         return content
-    if not sys.stdin.isatty():
-        piped = sys.stdin.read().strip()
+    if sys.stdin is not None and not sys.stdin.isatty():
+        try:
+            piped = sys.stdin.read().strip()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise PromptOptimizerError(f"could not read the prompt from stdin: {exc}") from exc
         if piped:
             return piped
     raise PromptOptimizerError(
@@ -52,14 +70,15 @@ def _collect_batch_inputs(source: str) -> List[str]:
     if path.is_dir():
         prompts = []
         for child in sorted(path.glob("*.txt")):
-            content = child.read_text(encoding="utf-8").strip()
+            content = _decode(child).strip()
             if content:
                 prompts.append(content)
         if not prompts:
             raise PromptOptimizerError(f"no non-empty .txt files in {source}")
         return prompts
     if path.is_file():
-        text = path.read_text(encoding="utf-8")
+        # Prompts are separated by a blank line; \r\n files must split too.
+        text = _decode(path).replace("\r\n", "\n").replace("\r", "\n")
         blocks = [block.strip() for block in text.split("\n\n") if block.strip()]
         if not blocks:
             raise PromptOptimizerError(f"{source} contains no prompts")
@@ -72,6 +91,8 @@ def _make_optimizer(args: argparse.Namespace) -> PromptOptimizer:
         engine=getattr(args, "engine", None),
         model=getattr(args, "model", None),
         temperature=getattr(args, "temperature", None),
+        timeout=getattr(args, "timeout", None),
+        max_retries=getattr(args, "retries", None),
     )
     return PromptOptimizer(config)
 
@@ -158,27 +179,44 @@ def cmd_batch(args: argparse.Namespace) -> int:
     )
 
     out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if out_dir.exists() and not out_dir.is_dir():
+        raise PromptOptimizerError(f"--out-dir {args.out_dir} exists and is not a directory")
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise PromptOptimizerError(f"could not create {args.out_dir}: {exc}") from exc
+
     for index, result in enumerate(results, 1):
         result.save(str(out_dir / f"optimized_{index:03d}.txt"))
 
     summary = optimizer.summary()
+    failures = [f.to_dict() for f in optimizer.failures]
     summary_path = out_dir / "summary.json"
-    summary_path.write_text(
-        json.dumps(
-            {"summary": summary, "results": [r.to_dict() for r in results]}, indent=2
-        ),
-        encoding="utf-8",
-    )
+    try:
+        summary_path.write_text(
+            json.dumps(
+                {
+                    "summary": summary,
+                    "failures": failures,
+                    "results": [r.to_dict() for r in results],
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise PromptOptimizerError(f"could not write {summary_path}: {exc}") from exc
 
     if args.json:
-        print(json.dumps(summary, indent=2))
+        print(json.dumps({**summary, "failures": failures}, indent=2))
     else:
         print(f"optimized {summary['runs']} prompt(s) into {out_dir}")
         print(f"average effectiveness gain: {summary['average_improvement']:+.3f}")
         print(f"engines used: {summary['engines']}")
+        if failures:
+            print(f"failed: {len(failures)} prompt(s); see {summary_path}")
         print(f"summary written to {summary_path}")
-    return 0
+    return 1 if failures and not results else 0
 
 
 def cmd_config(args: argparse.Namespace) -> int:
@@ -188,6 +226,8 @@ def cmd_config(args: argparse.Namespace) -> int:
     print(f"  api key       : {'set' if config.has_api_key else 'not set'}")
     print(f"  model         : {config.model}")
     print(f"  temperature   : {config.temperature}")
+    print(f"  timeout       : {config.timeout}s")
+    print(f"  max retries   : {config.max_retries}")
     print(f"  engine        : {config.engine} (resolves to {config.resolve_engine()})")
     return 0
 
@@ -210,6 +250,10 @@ def build_parser() -> argparse.ArgumentParser:
                          help="rewriting engine (default: auto)")
         sub.add_argument("--model", help="Gemini model id for the llm engine")
         sub.add_argument("--temperature", type=float, help="sampling temperature (0.0-2.0)")
+        sub.add_argument("--timeout", type=float,
+                         help="seconds to wait for the provider (default: 60)")
+        sub.add_argument("--retries", type=int,
+                         help="retries on a transient provider failure (default: 2)")
         sub.add_argument("--template", choices=template_names(),
                          help="force a template instead of picking one from the intent")
         sub.add_argument("--target", default="general", choices=MODEL_FAMILIES,
@@ -260,7 +304,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def use_utf8_stdio() -> None:
+    """Make the streams UTF-8 so a non-ASCII prompt cannot kill the process.
+
+    On Windows the console and any redirected pipe default to cp1252, and
+    printing an optimized prompt containing an em dash or CJK text raises
+    UnicodeEncodeError. Errors are replaced rather than raised: mangled output
+    beats a traceback.
+    """
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):  # pragma: no cover - detached/odd streams
+            pass
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    use_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "command", None):
@@ -271,6 +334,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except PromptOptimizerError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except BrokenPipeError:  # pragma: no cover - depends on the consumer
+        return 141
     except KeyboardInterrupt:  # pragma: no cover - interactive only
         print("\ninterrupted", file=sys.stderr)
         return 130
